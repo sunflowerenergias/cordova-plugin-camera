@@ -66,6 +66,7 @@ import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 
 /**
  * This class launches the camera view, allows the user to take a picture, closes the camera view,
@@ -125,6 +126,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
     private boolean correctOrientation;     // Should the pictures orientation be corrected
     private boolean orientationCorrected;   // Has the picture's orientation been corrected
     private boolean allowEdit;              // Should we allow the user to crop the image.
+    private boolean allowMultiple;          // Should we allow the user to select multiple images.
 
     public CallbackContext callbackContext;
 
@@ -171,6 +173,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
             this.allowEdit = args.getBoolean(7);
             this.correctOrientation = args.getBoolean(8);
             this.saveToPhotoAlbum = args.getBoolean(9);
+            this.allowMultiple = args.getBoolean(12);
 
             // If the user specifies a 0 or smaller width/height
             // make it -1 so later comparisons succeed
@@ -423,6 +426,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
             intent.addCategory(Intent.CATEGORY_OPENABLE);
         }
         if (this.cordova != null) {
+            intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple);
             this.cordova.startActivityForResult((CordovaPlugin) this, Intent.createChooser(intent,
                     new String(title)), (srcType + 1) * 16 + returnType + 1);
         }
@@ -554,8 +558,9 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                     this.failPicture("Unable to create bitmap!");
                     return;
                 }
+                String dataImage = this.processPicture(bitmap, this.encodingType);
 
-                this.processPicture(bitmap, this.encodingType);
+                this.callbackContext.success(dataImage);
             }
 
             // If sending filename back
@@ -721,7 +726,6 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
         return this.encodingType == JPEG ? JPEG_EXTENSION : PNG_EXTENSION;
     }
 
-
     /**
      * Applies all needed transformation to the image received from the gallery.
      *
@@ -729,139 +733,120 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
      * @param intent   An Intent, which can return result data to the caller (various data can be attached to Intent "extras").
      */
     private void processResultFromGallery(int destType, Intent intent) {
-        Uri uri = intent.getData();
-        if (uri == null) {
-            if (croppedUri != null) {
-                uri = croppedUri;
-            } else {
-                this.failPicture("null data from photo library");
-                return;
+
+        List<Uri> filesUri = new ArrayList<>();
+        List<String> filesResult = new ArrayList<>();
+
+        if (intent.getClipData() != null) {
+            for (int i = 0; i < intent.getClipData().getItemCount(); i++) {
+                filesUri.add(intent.getClipData().getItemAt(i).getUri());
             }
+        } else {
+            filesUri.add(intent.getData());
         }
 
-        String uriString = uri.toString();
-        String mimeTypeOfGalleryFile = FileHelper.getMimeType(uriString, this.cordova);
-        InputStream input;
-        try {
-            input = cordova.getActivity().getContentResolver().openInputStream(uri);
-        } catch (FileNotFoundException e) {
-            this.failPicture("Unable to open gallery input stream");
-            return;
-        }
+        for (Uri uri : filesUri) {
 
-        if (input == null) {
-            this.failPicture("Unable to open gallery input stream");
-            return;
-        }
-
-        try {
-            byte[] data = readData(input);
-
-            // If you ask for video or the selected file cannot be processed
-            // there will be no attempt to resize any returned data.
-            if (this.mediaType == VIDEO || !isImageMimeTypeProcessable(mimeTypeOfGalleryFile)) {
-                this.callbackContext.success(uriString);
-            } else {
-                Bitmap bitmap = null;
-
-                // This is a special case to just return the path as no scaling,
-                // rotating, nor compressing needs to be done
-                if (this.targetHeight == -1 && this.targetWidth == -1 &&
-                    destType == FILE_URI && !this.correctOrientation &&
-                    getMimetypeForEncodingType().equalsIgnoreCase(mimeTypeOfGalleryFile)) {
-                    this.callbackContext.success(uriString);
+            if (uri == null) {
+                if (croppedUri != null) {
+                    uri = croppedUri;
                 } else {
-                    try {
-                        bitmap = getScaledAndRotatedBitmap(data, mimeTypeOfGalleryFile);
-                    } catch (IOException e) {
-                        e.printStackTrace();
-                    }
-                    if (bitmap == null) {
-                        LOG.d(LOG_TAG, "I either have an unreadable uri or null bitmap");
-                        this.failPicture("Unable to create bitmap!");
-                        return;
-                    }
-
-                    // If sending base64 image back
-                    if (destType == DATA_URL) {
-                        this.processPicture(bitmap, this.encodingType);
-                    }
-
-                    // If sending filename back
-                    else if (destType == FILE_URI) {
-                        // Did we modify the image?
-                        if ((this.targetHeight > 0 && this.targetWidth > 0) ||
-                            (this.correctOrientation && this.orientationCorrected) ||
-                            !mimeTypeOfGalleryFile.equalsIgnoreCase(getMimetypeForEncodingType())) {
-                            try {
-                                String modifiedPath = this.outputModifiedBitmap(bitmap, uri, mimeTypeOfGalleryFile);
-                                // The modified image is cached by the app in order to get around this and not have to delete you
-                                // application cache I'm adding the current system time to the end of the file url.
-                                this.callbackContext.success("file://" + modifiedPath + "?" + System.currentTimeMillis());
-
-                            } catch (Exception e) {
-                                e.printStackTrace();
-                                this.failPicture("Error retrieving image: " + e.getLocalizedMessage());
-                            }
-                        } else {
-                            this.callbackContext.success(uriString);
-                        }
-                    }
-                    if (bitmap != null) {
-                        bitmap.recycle();
-                        bitmap = null;
-                    }
-                    System.gc();
-                }
-                if (bitmap == null) {
-                    LOG.d(LOG_TAG, "I either have an unreadable uri or null bitmap");
-                    this.failPicture("Unable to create bitmap!");
+                    this.failPicture("null data from photo library");
                     return;
                 }
+            }
 
-                // If sending base64 image back
-                if (destType == DATA_URL) {
-                    this.processPicture(bitmap, this.encodingType);
-                }
+            String uriString = uri.toString();
+            String mimeTypeOfGalleryFile = FileHelper.getMimeType(uriString, this.cordova);
+            InputStream input;
+            try {
+                input = cordova.getActivity().getContentResolver().openInputStream(uri);
+            } catch (FileNotFoundException e) {
+                this.failPicture("Unable to open gallery input stream");
+                return;
+            }
 
-                // If sending filename back
-                else if (destType == FILE_URI) {
-                    // Did we modify the image?
-                    if ( (this.targetHeight > 0 && this.targetWidth > 0) ||
-                            (this.correctOrientation && this.orientationCorrected) ||
-                            !mimeTypeOfGalleryFile.equalsIgnoreCase(getMimetypeForEncodingType()))
-                    {
-                        try {
-                            String modifiedPath = this.outputModifiedBitmap(bitmap, uri, mimeTypeOfGalleryFile);
-                            // The modified image is cached by the app in order to get around this and not have to delete you
-                            // application cache I'm adding the current system time to the end of the file url.
-                            this.callbackContext.success("file://" + modifiedPath + "?" + System.currentTimeMillis());
+            if (input == null) {
+                this.failPicture("Unable to open gallery input stream");
+                return;
+            }
 
-                        } catch (Exception e) {
-                            e.printStackTrace();
-                            this.failPicture("Error retrieving image: "+e.getLocalizedMessage());
-                        }
-                    } else {
+            try {
+                byte[] data = readData(input);
+
+                // If you ask for video or the selected file cannot be processed
+                // there will be no attempt to resize any returned data.
+                if (this.mediaType == VIDEO || !isImageMimeTypeProcessable(mimeTypeOfGalleryFile)) {
+                    this.callbackContext.success(uriString);
+                } else {
+                    Bitmap bitmap = null;
+
+                    // This is a special case to just return the path as no scaling,
+                    // rotating, nor compressing needs to be done
+                    if (this.targetHeight == -1 && this.targetWidth == -1 &&
+                            destType == FILE_URI && !this.correctOrientation &&
+                            getMimetypeForEncodingType().equalsIgnoreCase(mimeTypeOfGalleryFile)) {
                         this.callbackContext.success(uriString);
+                    } else {
+                        try {
+                            bitmap = getScaledAndRotatedBitmap(data, mimeTypeOfGalleryFile);
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        }
+                        if (bitmap == null) {
+                            LOG.d(LOG_TAG, "I either have an unreadable uri or null bitmap");
+                            this.failPicture("Unable to create bitmap!");
+                            return;
+                        }
+
+                        // If sending base64 image back
+                        if (destType == DATA_URL) {
+                            filesResult.add(this.processPicture(bitmap, this.encodingType));
+                        }
+
+                        // If sending filename back
+                        else if (destType == FILE_URI) {
+                            // Did we modify the image?
+                            if ((this.targetHeight > 0 && this.targetWidth > 0) ||
+                                    (this.correctOrientation && this.orientationCorrected) ||
+                                    !mimeTypeOfGalleryFile.equalsIgnoreCase(getMimetypeForEncodingType())) {
+                                try {
+                                    String modifiedPath = this.outputModifiedBitmap(bitmap, uri, mimeTypeOfGalleryFile);
+                                    // The modified image is cached by the app in order to get around this and not
+                                    // have to delete you
+                                    // application cache I'm adding the current system time to the end of the file
+                                    // url.
+                                    this.callbackContext
+                                            .success("file://" + modifiedPath + "?" + System.currentTimeMillis());
+
+                                } catch (Exception e) {
+                                    e.printStackTrace();
+                                    this.failPicture("Error retrieving image: " + e.getLocalizedMessage());
+                                }
+                            } else {
+                                this.callbackContext.success(uriString);
+                            }
+                        }
+                        if (bitmap != null) {
+                            bitmap.recycle();
+                            bitmap = null;
+                        }
+                        System.gc();
                     }
                 }
-                if (bitmap != null) {
-                    bitmap.recycle();
-                    bitmap = null;
-                }
-                System.gc();
-            }
 
-            input.close();
-        }
-        catch (Exception e) {
-            try {
                 input.close();
-            } catch (IOException ex) {
-                ex.printStackTrace();
+            } catch (Exception e) {
+                try {
+                    input.close();
+                } catch (IOException ex) {
+                    ex.printStackTrace();
+                }
+                this.failPicture(e.getLocalizedMessage());
             }
-            this.failPicture(e.getLocalizedMessage());
         }
+
+        this.callbackContext.success(new JSONArray(filesResult));
     }
 
     /**
@@ -1237,7 +1222,7 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
      *
      * @param bitmap
      */
-    public void processPicture(Bitmap bitmap, int encodingType) {
+    public String processPicture(Bitmap bitmap, int encodingType) {
         ByteArrayOutputStream dataStream = new ByteArrayOutputStream();
         CompressFormat compressFormat = getCompressFormatForEncodingType(encodingType);
 
@@ -1250,13 +1235,15 @@ public class CameraLauncher extends CordovaPlugin implements MediaScannerConnect
                 byte[] code = dataStream.toByteArray();
                 byte[] output = Base64.encode(code, Base64.NO_WRAP);
                 sb.append(new String(output));
-                this.callbackContext.success(sb.toString());
                 output = null;
                 code = null;
+                return sb.toString();
             }
         } catch (Exception e) {
             this.failPicture("Error compressing image: "+e.getLocalizedMessage());
         }
+
+        return "";
     }
 
     /**
